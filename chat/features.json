@@ -1,0 +1,65 @@
+{
+  "shakespeare": {
+    "layer": 28,
+    "position": "R",
+    "expansion": "8x",
+    "index": 8401,
+    "description": "Shakespearean language"
+  },
+  "romance": {
+    "layer": 22,
+    "position": "R",
+    "expansion": "8x",
+    "index": 21103,
+    "description": "Romantic/love-themed"
+  },
+  "dragons": {
+    "layer": 22,
+    "position": "R",
+    "expansion": "8x",
+    "index": 4396,
+    "description": "Fantasy/dragon content"
+  },
+  "code": {
+    "layer": 24,
+    "position": "R",
+    "expansion": "8x",
+    "index": 7976,
+    "description": "Programming terminology"
+  },
+  "drama": {
+    "layer": 16,
+    "position": "M",
+    "expansion": "8x",
+    "index": 18279,
+    "description": "Theater/dramatic language"
+  },
+  "medical": {
+    "layer": 26,
+    "position": "R",
+    "expansion": "8x",
+    "index": 15897,
+    "description": "Medical/health language"
+  },
+  "skeptic": {
+    "layer": 20,
+    "position": "R",
+    "expansion": "8x",
+    "index": 14534,
+    "description": "Doubt/skepticism"
+  },
+  "pirate": {
+    "layer": 23,
+    "position": "R",
+    "expansion": "32x",
+    "index": 41943,
+    "description": "Pirate/nautical (131K SAE)"
+  },
+  "wilde": {
+    "layer": 30,
+    "position": "R",
+    "expansion": "8x",
+    "index": 23397,
+    "description": "Literary/Oscar Wilde style"
+  }
+}
