@@ -10,7 +10,7 @@ os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
 import torch
 from collections import defaultdict
 from nnsight.modeling.vllm import VLLM
-from sae import FeatureManager
+from sae import FeatureManager, steer_activations, ensure_downloaded
 
 POSITION_PRIORITY = {"A": 0, "M": 1, "R": 2}
 
@@ -18,10 +18,10 @@ POSITION_PRIORITY = {"A": 0, "M": 1, "R": 2}
 def build_sorted_steerings(active_steerings):
     grouped = defaultdict(list)
     for name, info in active_steerings.items():
-        key = (info["layer"], info["position"])
-        grouped[key].append((name, info["direction"], info["scale"]))
+        key = (info["layer"], info["position"], info["expansion"])
+        grouped[key].append((info["index"], info["scale"]))
     return sorted(
-        [(layer, pos, steerings) for (layer, pos), steerings in grouped.items()],
+        [(layer, pos, exp, mods) for (layer, pos, exp), mods in grouped.items()],
         key=lambda x: (x[0], POSITION_PRIORITY[x[1]]),
     )
 
@@ -29,32 +29,26 @@ def build_sorted_steerings(active_steerings):
 def apply_steerings(model, sorted_steerings):
     """Apply steering interventions inside a trace context.
 
-    Uses clone + assign back to work with vLLM's inference_mode.
+    Calls steer_activations() which lazy-loads the SAE on the worker process.
     """
-    for layer, position, steerings in sorted_steerings:
+    for layer, position, exp, mods in sorted_steerings:
         if position == "R":
-            # Layer returns (hidden_states, residual) tuple.
             layer_out = model.model.layers[layer].output
             hidden = layer_out[0].clone()
-            for name, direction, scale in steerings:
-                hidden += scale * direction.to(
-                    device=hidden.device, dtype=hidden.dtype
-                )
-            model.model.layers[layer].output = (hidden, *layer_out[1:])
+            model.model.layers[layer].output = (
+                steer_activations(hidden, layer, position, exp, mods),
+                *layer_out[1:],
+            )
         elif position == "M":
             out = model.model.layers[layer].mlp.output.clone()
-            for name, direction, scale in steerings:
-                out += scale * direction.to(
-                    device=out.device, dtype=out.dtype
-                )
-            model.model.layers[layer].mlp.output = out
+            model.model.layers[layer].mlp.output = steer_activations(
+                out, layer, position, exp, mods
+            )
         elif position == "A":
             out = model.model.layers[layer].self_attn.output.clone()
-            for name, direction, scale in steerings:
-                out += scale * direction.to(
-                    device=out.device, dtype=out.dtype
-                )
-            model.model.layers[layer].self_attn.output = out
+            model.model.layers[layer].self_attn.output = steer_activations(
+                out, layer, position, exp, mods
+            )
 
 
 async def stream_response(tracer):
@@ -99,11 +93,12 @@ async def main():
         import traceback; traceback.print_exc()
         failed += 1
 
-    # Test 2: Single R steering (dragons L22R)
+    # Test 2: Single R steering (dragons L22R) via SAE encode-modify-decode
     print("--- Test 2: Single R steering (dragons) ---", flush=True)
     try:
-        direction, layer, pos = fm.get_direction("dragons")
-        active = {"dragons": {"direction": direction, "layer": layer, "position": pos, "scale": 15.0}}
+        layer, pos, exp, idx = fm.resolve_feature("dragons")
+        ensure_downloaded(layer, pos, exp)
+        active = {"dragons": {"layer": layer, "position": pos, "expansion": exp, "index": idx, "scale": 15.0}}
         sorted_steerings = build_sorted_steerings(active)
 
         with model.trace("Tell me about Paris", temperature=0.0, max_tokens=30) as tracer:
@@ -136,8 +131,9 @@ async def main():
     # Test 4: MLP steering (drama L16M)
     print("--- Test 4: MLP steering (drama) ---", flush=True)
     try:
-        direction, layer, pos = fm.get_direction("drama")
-        active = {"drama": {"direction": direction, "layer": layer, "position": pos, "scale": 15.0}}
+        layer, pos, exp, idx = fm.resolve_feature("drama")
+        ensure_downloaded(layer, pos, exp)
+        active = {"drama": {"layer": layer, "position": pos, "expansion": exp, "index": idx, "scale": 15.0}}
         sorted_steerings = build_sorted_steerings(active)
 
         with model.trace("Tell me about Paris", temperature=0.0, max_tokens=30) as tracer:
@@ -157,8 +153,9 @@ async def main():
     try:
         active = {}
         for name in ["shakespeare", "romance"]:
-            direction, layer, pos = fm.get_direction(name)
-            active[name] = {"direction": direction, "layer": layer, "position": pos, "scale": 10.0}
+            layer, pos, exp, idx = fm.resolve_feature(name)
+            ensure_downloaded(layer, pos, exp)
+            active[name] = {"layer": layer, "position": pos, "expansion": exp, "index": idx, "scale": 10.0}
         sorted_steerings = build_sorted_steerings(active)
 
         with model.trace("Tell me about Paris", temperature=0.0, max_tokens=30) as tracer:

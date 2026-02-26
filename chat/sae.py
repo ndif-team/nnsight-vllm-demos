@@ -73,7 +73,7 @@ class LlamaScopeSAE(nn.Module):
             x = x * (self.dataset_average_activation_norm / x.norm(dim=-1, keepdim=True))
         pre_acts = self.encoder(x)
         # JumpReLU: zero out activations below threshold
-        return pre_acts * (pre_acts > self.jump_relu_threshold).float()
+        return pre_acts * (pre_acts > self.jump_relu_threshold).to(pre_acts.dtype)
 
     def decode(self, features: torch.Tensor) -> torch.Tensor:
         return self.decoder(features)
@@ -99,15 +99,15 @@ class LlamaScopeSAE(nn.Module):
         Returns:
             Modified activations with SAE reconstruction error preserved.
         """
-        if self.encoder.weight.device != x.device:
-            self.to(x.device)
-        x_sae = x.to(dtype=self.encoder.weight.dtype)
-        encoded = self.encode(x_sae)
+        # Move SAE to match input device/dtype (cached after first call)
+        if self.encoder.weight.device != x.device or self.encoder.weight.dtype != x.dtype:
+            self.to(device=x.device, dtype=x.dtype)
+        encoded = self.encode(x)
         recon = self.decode(encoded)
-        error = x_sae - recon
+        error = x - recon
         for idx, scale in modifications:
             encoded[..., idx] += scale
-        return (self.decode(encoded) + error).to(dtype=x.dtype)
+        return self.decode(encoded) + error
 
     @classmethod
     def from_pretrained(
