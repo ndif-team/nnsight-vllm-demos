@@ -69,7 +69,8 @@ async def main():
     model = VLLM(
         "meta-llama/Llama-3.1-8B-Instruct",
         tensor_parallel_size=1,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.4,
+        max_model_len=4096,
         dispatch=True,
         mode="async",
     )

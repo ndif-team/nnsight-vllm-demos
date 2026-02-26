@@ -91,10 +91,18 @@ class LlamaScopeSAE(nn.Module):
     ) -> torch.Tensor:
         """Encode → modify features → decode, preserving reconstruction error.
 
+        Uses clamping (not additive) to prevent degeneration during
+        autoregressive generation.  For positive scale, the feature
+        activation is clamped to at least ``scale`` — once the model
+        naturally activates the feature above the target (because the
+        context is already on-topic), steering backs off and the KV-cache
+        feedback loop is broken.
+
         Args:
             x: Activation tensor [..., d_model].
             modifications: List of (feature_index, scale) pairs.
-                Each adds ``scale`` to the feature's activation.
+                Positive scale: ensure feature is at least this active.
+                Negative scale: suppress the feature to zero.
 
         Returns:
             Modified activations with SAE reconstruction error preserved.
@@ -106,7 +114,12 @@ class LlamaScopeSAE(nn.Module):
         recon = self.decode(encoded)
         error = x - recon
         for idx, scale in modifications:
-            encoded[..., idx] += scale
+            if scale > 0:
+                # Set a floor — doesn't compound through the KV cache
+                encoded[..., idx] = torch.clamp(encoded[..., idx], min=scale)
+            else:
+                # Suppress: zero out the feature
+                encoded[..., idx] = 0
         return self.decode(encoded) + error
 
     @classmethod

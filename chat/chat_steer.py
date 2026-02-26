@@ -153,7 +153,7 @@ def show_help():
     """Print commands reference."""
     print(f"""
 {BOLD}Commands:{RESET}
-  {CYAN}/steer <feature> [scale=10]{RESET}   Activate a steering direction
+  {CYAN}/steer <feature> [scale=8]{RESET}   Activate a steering direction
   {CYAN}/clear{RESET}                         Remove all steerings
   {CYAN}/reset{RESET}                         Clear chat history
   {CYAN}/features{RESET}                      List available features
@@ -192,13 +192,13 @@ def handle_command(line, active_steerings, messages, fm):
     if cmd == "/steer":
         if len(parts) < 2:
             print(f"\n{BOLD}Usage:{RESET} /steer <feature> [scale]")
-            print(f"  e.g.  /steer shakespeare 15")
-            print(f"  e.g.  /steer 28:8401 10")
-            print(f"  {DIM}Default scale: 10{RESET}\n")
+            print(f"  e.g.  /steer shakespeare 8")
+            print(f"  e.g.  /steer 28:8401 5")
+            print(f"  {DIM}Default scale: 8  (try 3-10, higher = stronger){RESET}\n")
             return True
         feature_spec = parts[1]
         try:
-            scale = float(parts[2]) if len(parts) >= 3 else 10.0
+            scale = float(parts[2]) if len(parts) >= 3 else 8.0
         except ValueError:
             print(f"\n{RED}Invalid scale: {parts[2]!r} (must be a number){RESET}\n")
             return True
@@ -233,7 +233,7 @@ def print_banner(args):
   {DIM}Model: {args.model} (tp={args.tp}){RESET}
 
   {BOLD}Commands:{RESET}
-    {CYAN}/steer <feature> [scale=10]{RESET}   Activate a steering direction
+    {CYAN}/steer <feature> [scale=8]{RESET}   Activate a steering direction
     {CYAN}/clear{RESET}                         Remove all steerings
     {CYAN}/reset{RESET}                         Clear chat history
     {CYAN}/features{RESET}                      List available features
