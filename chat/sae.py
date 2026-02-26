@@ -1,7 +1,7 @@
-"""Llama Scope SAE loading and lightweight feature direction manager.
+"""Llama Scope SAE loading and feature steering.
 
-LlamaScopeSAE — Full JumpReLU SAE (for analysis/education, not used by steering).
-FeatureManager — Extracts single decoder columns (~8KB each) for steering.
+LlamaScopeSAE — Full JumpReLU SAE with encode → modify → decode steering.
+FeatureManager — Loads SAEs on demand and resolves feature specs to SAE coordinates.
 """
 
 import json
@@ -49,8 +49,8 @@ def _hyperparams_path(layer: int, position: str, expansion: str) -> str:
 class LlamaScopeSAE(nn.Module):
     """Full JumpReLU Sparse Autoencoder from Llama Scope.
 
-    This loads the complete SAE weights (~256MB for 8x, ~1GB for 32x).
-    For steering you only need a single decoder column — use FeatureManager instead.
+    Loads ~256MB for 8x expansion, ~1GB for 32x. Used by FeatureManager
+    for encode-modify-decode steering (see ``steer``).
     """
 
     def __init__(
@@ -82,6 +82,32 @@ class LlamaScopeSAE(nn.Module):
         """Returns (reconstruction, encoded_features)."""
         f = self.encode(x)
         return self.decode(f), f
+
+    @torch.no_grad()
+    def steer(
+        self,
+        x: torch.Tensor,
+        modifications: list[tuple[int, float]],
+    ) -> torch.Tensor:
+        """Encode → modify features → decode, preserving reconstruction error.
+
+        Args:
+            x: Activation tensor [..., d_model].
+            modifications: List of (feature_index, scale) pairs.
+                Each adds ``scale`` to the feature's activation.
+
+        Returns:
+            Modified activations with SAE reconstruction error preserved.
+        """
+        if self.encoder.weight.device != x.device:
+            self.to(x.device)
+        x_sae = x.to(dtype=self.encoder.weight.dtype)
+        encoded = self.encode(x_sae)
+        recon = self.decode(encoded)
+        error = x_sae - recon
+        for idx, scale in modifications:
+            encoded[..., idx] += scale
+        return (self.decode(encoded) + error).to(dtype=x.dtype)
 
     @classmethod
     def from_pretrained(
@@ -127,12 +153,11 @@ class LlamaScopeSAE(nn.Module):
 
 
 class FeatureManager:
-    """Lightweight manager that extracts single decoder columns for steering.
+    """Manages SAE loading and feature resolution for steering.
 
-    The steering formula `decode(encode(x) + delta) + error` simplifies to
-    `x + scale * decoder_column[feature_index]` because decode is linear and
-    the error term cancels. So we only need one decoder column (~8KB per feature),
-    not the full SAE.
+    Loads full SAEs on demand (cached per layer/position/expansion) and
+    provides the ``steer`` method on each SAE for encode → modify → decode
+    interventions.
     """
 
     def __init__(self, catalog_path: Optional[str] = None):
@@ -140,8 +165,8 @@ class FeatureManager:
             catalog_path = str(Path(__file__).parent / "features.json")
         with open(catalog_path) as f:
             self.catalog: dict = json.load(f)
-        # Cache: (layer, pos, exp, idx) -> Tensor on CPU
-        self._direction_cache: dict[tuple, torch.Tensor] = {}
+        # Cache: (layer, pos, exp) -> LlamaScopeSAE
+        self._sae_cache: dict[tuple, LlamaScopeSAE] = {}
 
     def list_features(self) -> list[dict]:
         """Return the feature catalog for display."""
@@ -150,30 +175,24 @@ class FeatureManager:
             result.append({"name": name, **info})
         return result
 
-    def get_direction(
+    def resolve_feature(
         self, feature_spec: str
-    ) -> tuple[torch.Tensor, int, str]:
-        """Get a steering direction vector.
+    ) -> tuple[int, str, str, int]:
+        """Resolve a feature spec to SAE coordinates.
 
         Args:
             feature_spec: Either a curated name ("shakespeare") or
                 numeric "layer:index" format (defaults to R, 8x).
 
         Returns:
-            (direction_tensor, layer, position) where direction is on CPU.
+            (layer, position, expansion, feature_index).
         """
         if feature_spec in self.catalog:
             info = self.catalog[feature_spec]
-            layer = info["layer"]
-            pos = info["position"]
-            exp = info["expansion"]
-            idx = info["index"]
+            return info["layer"], info["position"], info["expansion"], info["index"]
         elif ":" in feature_spec:
             parts = feature_spec.split(":")
-            layer = int(parts[0])
-            idx = int(parts[1])
-            pos = "R"
-            exp = "8x"
+            return int(parts[0]), "R", "8x", int(parts[1])
         else:
             raise ValueError(
                 f"Unknown feature: {feature_spec!r}. "
@@ -181,28 +200,17 @@ class FeatureManager:
                 f"or 'layer:index' format (e.g. '28:8401')."
             )
 
-        direction = self._download_direction(layer, pos, exp, idx)
-        return direction, layer, pos
+    def get_sae(
+        self, layer: int, position: str, expansion: str
+    ) -> LlamaScopeSAE:
+        """Load (or return cached) full SAE for a given layer/position/expansion.
 
-    def _download_direction(
-        self, layer: int, pos: str, exp: str, idx: int
-    ) -> torch.Tensor:
-        """Download a single decoder column from Llama Scope.
-
-        Uses safetensors slicing to extract just one column (~8KB) without
-        loading the full weight matrix into memory. The safetensors file is
-        cached on disk by hf_hub_download.
+        The SAE is loaded to CPU initially and moved to the correct device
+        on first use inside ``LlamaScopeSAE.steer()``.
         """
-        cache_key = (layer, pos, exp, idx)
-        if cache_key in self._direction_cache:
-            return self._direction_cache[cache_key]
-
-        repo = _repo_id(pos, exp)
-        st_path = hf_hub_download(repo, _safetensors_path(layer, pos, exp))
-
-        with safe_open(st_path, framework="pt") as f:
-            # decoder.weight shape: [d_model, d_sae]
-            direction = f.get_slice("decoder.weight")[:, idx]
-
-        self._direction_cache[cache_key] = direction
-        return direction
+        key = (layer, position, expansion)
+        if key not in self._sae_cache:
+            self._sae_cache[key] = LlamaScopeSAE.from_pretrained(
+                layer, position, expansion, device="cpu"
+            )
+        return self._sae_cache[key]

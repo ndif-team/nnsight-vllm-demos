@@ -102,22 +102,24 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_sorted_steerings(active_steerings):
-    """Group and sort active steerings by forward-pass execution order.
+def build_sorted_steerings(active_steerings, fm):
+    """Group active steerings by SAE and sort by forward-pass execution order.
 
-    Returns a list of (layer, position, [(name, direction, scale), ...])
+    Returns a list of (layer, position, sae, [(feature_index, scale), ...])
     sorted by (layer, POSITION_PRIORITY[position]) so module accesses
     respect forward-pass order within a single invoke.
     """
     grouped = defaultdict(list)
     for name, info in active_steerings.items():
-        key = (info["layer"], info["position"])
-        grouped[key].append((name, info["direction"], info["scale"]))
+        key = (info["layer"], info["position"], info["expansion"])
+        grouped[key].append((info["index"], info["scale"]))
 
-    return sorted(
-        [(layer, pos, steerings) for (layer, pos), steerings in grouped.items()],
-        key=lambda x: (x[0], POSITION_PRIORITY[x[1]]),
-    )
+    result = []
+    for (layer, pos, exp), mods in grouped.items():
+        sae = fm.get_sae(layer, pos, exp)
+        result.append((layer, pos, sae, mods))
+
+    return sorted(result, key=lambda x: (x[0], POSITION_PRIORITY[x[1]]))
 
 
 def show_features(fm):
@@ -200,14 +202,19 @@ def handle_command(line, active_steerings, messages, fm):
             print(f"\n{RED}Invalid scale: {parts[2]!r} (must be a number){RESET}\n")
             return True
         try:
-            direction, layer, pos = fm.get_direction(feature_spec)
+            layer, pos, exp, idx = fm.resolve_feature(feature_spec)
         except ValueError as e:
             print(f"\n{RED}{e}{RESET}\n")
             return True
+        # Pre-load the SAE so the first generation isn't slow
+        print(f"{DIM}Loading SAE for L{layer}{pos}-{exp}...{RESET}", end="", flush=True)
+        fm.get_sae(layer, pos, exp)
+        print(f"\r\033[K", end="")  # Clear the loading message
         active_steerings[feature_spec] = {
-            "direction": direction,
             "layer": layer,
             "position": pos,
+            "expansion": exp,
+            "index": idx,
             "scale": scale,
         }
         print(f"\n{YELLOW}Steering active: {feature_spec} at scale {scale} (L{layer}{pos}){RESET}\n")
@@ -293,7 +300,7 @@ async def main():
         )
 
         if active_steerings:
-            sorted_steerings = build_sorted_steerings(active_steerings)
+            sorted_steerings = build_sorted_steerings(active_steerings, fm)
 
             with model.trace(
                 prompt,
@@ -302,32 +309,22 @@ async def main():
                 max_tokens=args.max_tokens,
             ) as tracer:
                 for iteration in tracer.iter[:]:
-                    for layer, position, steerings in sorted_steerings:
+                    for layer, position, sae, mods in sorted_steerings:
                         # vLLM runs in inference_mode — clone to leave
-                        # inference mode, modify the clone, assign back.
+                        # inference mode, then encode → modify → decode + error.
                         if position == "R":
-                            # Layer returns (hidden_states, residual) tuple.
                             layer_out = model.model.layers[layer].output
                             hidden = layer_out[0].clone()
-                            for name, direction, scale in steerings:
-                                hidden += scale * direction.to(
-                                    device=hidden.device, dtype=hidden.dtype
-                                )
-                            model.model.layers[layer].output = (hidden, *layer_out[1:])
+                            model.model.layers[layer].output = (
+                                sae.steer(hidden, mods),
+                                *layer_out[1:],
+                            )
                         elif position == "M":
                             out = model.model.layers[layer].mlp.output.clone()
-                            for name, direction, scale in steerings:
-                                out += scale * direction.to(
-                                    device=out.device, dtype=out.dtype
-                                )
-                            model.model.layers[layer].mlp.output = out
+                            model.model.layers[layer].mlp.output = sae.steer(out, mods)
                         elif position == "A":
                             out = model.model.layers[layer].self_attn.output.clone()
-                            for name, direction, scale in steerings:
-                                out += scale * direction.to(
-                                    device=out.device, dtype=out.dtype
-                                )
-                            model.model.layers[layer].self_attn.output = out
+                            model.model.layers[layer].self_attn.output = sae.steer(out, mods)
         else:
             with model.trace(
                 prompt,
