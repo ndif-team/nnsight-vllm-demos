@@ -21,7 +21,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from nnsight.modeling.vllm import VLLM
-from sae import FeatureManager
+from sae import FeatureManager, ensure_downloaded, steer_activations
 
 # ANSI color codes
 DIM = "\033[2m"
@@ -102,24 +102,25 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_sorted_steerings(active_steerings, fm):
+def build_sorted_steerings(active_steerings):
     """Group active steerings by SAE and sort by forward-pass execution order.
 
-    Returns a list of (layer, position, sae, [(feature_index, scale), ...])
+    Returns a list of (layer, position, expansion, [(feature_index, scale), ...])
     sorted by (layer, POSITION_PRIORITY[position]) so module accesses
     respect forward-pass order within a single invoke.
+
+    Only plain Python scalars are returned — no SAE objects.  The actual SAE
+    is loaded lazily on the worker via ``steer_activations()``.
     """
     grouped = defaultdict(list)
     for name, info in active_steerings.items():
         key = (info["layer"], info["position"], info["expansion"])
         grouped[key].append((info["index"], info["scale"]))
 
-    result = []
-    for (layer, pos, exp), mods in grouped.items():
-        sae = fm.get_sae(layer, pos, exp)
-        result.append((layer, pos, sae, mods))
-
-    return sorted(result, key=lambda x: (x[0], POSITION_PRIORITY[x[1]]))
+    return sorted(
+        [(layer, pos, exp, mods) for (layer, pos, exp), mods in grouped.items()],
+        key=lambda x: (x[0], POSITION_PRIORITY[x[1]]),
+    )
 
 
 def show_features(fm):
@@ -206,9 +207,9 @@ def handle_command(line, active_steerings, messages, fm):
         except ValueError as e:
             print(f"\n{RED}{e}{RESET}\n")
             return True
-        # Pre-load the SAE so the first generation isn't slow
-        print(f"{DIM}Loading SAE for L{layer}{pos}-{exp}...{RESET}", end="", flush=True)
-        fm.get_sae(layer, pos, exp)
+        # Pre-download SAE files so the worker doesn't block on network I/O
+        print(f"{DIM}Downloading SAE for L{layer}{pos}-{exp}...{RESET}", end="", flush=True)
+        ensure_downloaded(layer, pos, exp)
         print(f"\r\033[K", end="")  # Clear the loading message
         active_steerings[feature_spec] = {
             "layer": layer,
@@ -300,7 +301,7 @@ async def main():
         )
 
         if active_steerings:
-            sorted_steerings = build_sorted_steerings(active_steerings, fm)
+            sorted_steerings = build_sorted_steerings(active_steerings)
 
             with model.trace(
                 prompt,
@@ -309,22 +310,27 @@ async def main():
                 max_tokens=args.max_tokens,
             ) as tracer:
                 for iteration in tracer.iter[:]:
-                    for layer, position, sae, mods in sorted_steerings:
-                        # vLLM runs in inference_mode — clone to leave
-                        # inference mode, then encode → modify → decode + error.
+                    for layer, position, exp, mods in sorted_steerings:
+                        # SAE is loaded lazily on the worker process via
+                        # steer_activations() — only plain scalars cross
+                        # the process boundary, no pickling of nn.Modules.
                         if position == "R":
                             layer_out = model.model.layers[layer].output
                             hidden = layer_out[0].clone()
                             model.model.layers[layer].output = (
-                                sae.steer(hidden, mods),
+                                steer_activations(hidden, layer, position, exp, mods),
                                 *layer_out[1:],
                             )
                         elif position == "M":
                             out = model.model.layers[layer].mlp.output.clone()
-                            model.model.layers[layer].mlp.output = sae.steer(out, mods)
+                            model.model.layers[layer].mlp.output = steer_activations(
+                                out, layer, position, exp, mods
+                            )
                         elif position == "A":
                             out = model.model.layers[layer].self_attn.output.clone()
-                            model.model.layers[layer].self_attn.output = sae.steer(out, mods)
+                            model.model.layers[layer].self_attn.output = steer_activations(
+                                out, layer, position, exp, mods
+                            )
         else:
             with model.trace(
                 prompt,

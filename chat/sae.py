@@ -152,12 +152,69 @@ class LlamaScopeSAE(nn.Module):
         return sae.to(device)
 
 
-class FeatureManager:
-    """Manages SAE loading and feature resolution for steering.
+# ---------------------------------------------------------------------------
+# Worker-side SAE cache and steering function.
+#
+# steer_activations() is meant to be called INSIDE a trace so it executes
+# on the vLLM worker process.  SAEs are loaded from the HF disk cache on
+# first use and kept in a module-level dict — no pickling across processes.
+# ---------------------------------------------------------------------------
 
-    Loads full SAEs on demand (cached per layer/position/expansion) and
-    provides the ``steer`` method on each SAE for encode → modify → decode
-    interventions.
+_worker_sae_cache: dict[tuple, LlamaScopeSAE] = {}
+
+
+def steer_activations(
+    x: torch.Tensor,
+    layer: int,
+    position: str,
+    expansion: str,
+    modifications: list[tuple[int, float]],
+) -> torch.Tensor:
+    """Load SAE on this process (from HF cache) and steer activations.
+
+    Intended to be called inside an nnsight trace so that the SAE is loaded
+    and cached on the vLLM worker process — nothing is pickled or sent over.
+
+    Args:
+        x: Activation tensor [..., d_model].
+        layer: Transformer layer index.
+        position: Hook position — "R", "M", or "A".
+        expansion: "8x" or "32x".
+        modifications: List of (feature_index, scale) pairs.
+
+    Returns:
+        Modified activations.
+    """
+    key = (layer, position, expansion)
+    if key not in _worker_sae_cache:
+        _worker_sae_cache[key] = LlamaScopeSAE.from_pretrained(
+            layer, position, expansion, device=str(x.device),
+        )
+    sae = _worker_sae_cache[key]
+    return sae.steer(x, modifications)
+
+
+def ensure_downloaded(layer: int, position: str, expansion: str) -> None:
+    """Ensure SAE files are in the HF cache (no-op if already downloaded).
+
+    Call this on the main process so the first trace doesn't block on a
+    network download.
+    """
+    repo = _repo_id(position, expansion)
+    hf_hub_download(repo, _safetensors_path(layer, position, expansion))
+    hf_hub_download(repo, _hyperparams_path(layer, position, expansion))
+
+
+# ---------------------------------------------------------------------------
+# FeatureManager — resolves feature names/specs to SAE coordinates.
+# ---------------------------------------------------------------------------
+
+
+class FeatureManager:
+    """Resolves feature names to SAE coordinates for steering.
+
+    Does NOT hold SAE weights — those are loaded lazily on the worker
+    process via ``steer_activations()``.
     """
 
     def __init__(self, catalog_path: Optional[str] = None):
@@ -165,8 +222,6 @@ class FeatureManager:
             catalog_path = str(Path(__file__).parent / "features.json")
         with open(catalog_path) as f:
             self.catalog: dict = json.load(f)
-        # Cache: (layer, pos, exp) -> LlamaScopeSAE
-        self._sae_cache: dict[tuple, LlamaScopeSAE] = {}
 
     def list_features(self) -> list[dict]:
         """Return the feature catalog for display."""
@@ -199,18 +254,3 @@ class FeatureManager:
                 f"Use a curated name ({', '.join(self.catalog.keys())}) "
                 f"or 'layer:index' format (e.g. '28:8401')."
             )
-
-    def get_sae(
-        self, layer: int, position: str, expansion: str
-    ) -> LlamaScopeSAE:
-        """Load (or return cached) full SAE for a given layer/position/expansion.
-
-        The SAE is loaded to CPU initially and moved to the correct device
-        on first use inside ``LlamaScopeSAE.steer()``.
-        """
-        key = (layer, position, expansion)
-        if key not in self._sae_cache:
-            self._sae_cache[key] = LlamaScopeSAE.from_pretrained(
-                layer, position, expansion, device="cpu"
-            )
-        return self._sae_cache[key]
