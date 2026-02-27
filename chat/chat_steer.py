@@ -309,6 +309,7 @@ async def main():
                 top_p=0.9,
                 max_tokens=args.max_tokens,
             ) as tracer:
+                steer_state = {"max_steps": 10}  # Stop steering after N tokens
                 for iteration in tracer.iter[:]:
                     for layer, position, exp, mods in sorted_steerings:
                         # SAE is loaded lazily on the worker process via
@@ -318,18 +319,18 @@ async def main():
                             layer_out = model.model.layers[layer].output
                             hidden = layer_out[0].clone()
                             model.model.layers[layer].output = (
-                                steer_activations(hidden, layer, position, exp, mods),
+                                steer_activations(hidden, layer, position, exp, mods, state=steer_state),
                                 *layer_out[1:],
                             )
                         elif position == "M":
                             out = model.model.layers[layer].mlp.output.clone()
                             model.model.layers[layer].mlp.output = steer_activations(
-                                out, layer, position, exp, mods
+                                out, layer, position, exp, mods, state=steer_state
                             )
                         elif position == "A":
                             out = model.model.layers[layer].self_attn.output.clone()
                             model.model.layers[layer].self_attn.output = steer_activations(
-                                out, layer, position, exp, mods
+                                out, layer, position, exp, mods, state=steer_state
                             )
         else:
             with model.trace(

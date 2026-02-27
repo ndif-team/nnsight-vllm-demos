@@ -15,6 +15,7 @@ This is not a constrained API with predefined operations. It's arbitrary Python 
 | Demo | Description |
 |------|-------------|
 | [chat](chat/) | Stream tokens from a chat model using NNsight's async vLLM engine |
+| [chat + SAE steering](chat/) | Steer chat responses with Llama Scope SAE feature directions |
 
 ## Setup
 

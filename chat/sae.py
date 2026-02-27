@@ -88,25 +88,31 @@ class LlamaScopeSAE(nn.Module):
         self,
         x: torch.Tensor,
         modifications: list[tuple[int, float]],
+        state: Optional[dict] = None,
     ) -> torch.Tensor:
         """Encode → modify features → decode, preserving reconstruction error.
 
-        Uses clamping (not additive) to prevent degeneration during
-        autoregressive generation.  For positive scale, the feature
-        activation is clamped to at least ``scale`` — once the model
-        naturally activates the feature above the target (because the
-        context is already on-topic), steering backs off and the KV-cache
-        feedback loop is broken.
+        Additive steering with a count-based cutoff.  Pass a mutable
+        ``state`` dict with a ``"max_steps"`` key to limit how many
+        generation steps are steered.  After ``max_steps``, the model
+        continues unsteered — the KV cache already contains steered
+        context, which maintains the theme naturally.
 
         Args:
             x: Activation tensor [..., d_model].
             modifications: List of (feature_index, scale) pairs.
-                Positive scale: ensure feature is at least this active.
-                Negative scale: suppress the feature to zero.
+            state: Mutable dict shared across generation steps.
+                ``state["max_steps"]``: stop steering after this many steps.
+                Without state, steering is unconditional.
 
         Returns:
             Modified activations with SAE reconstruction error preserved.
         """
+        if state is not None:
+            state["step"] = state.get("step", 0) + 1
+            if state["step"] > state.get("max_steps", float("inf")):
+                return x
+
         # Move SAE to match input device/dtype (cached after first call)
         if self.encoder.weight.device != x.device or self.encoder.weight.dtype != x.dtype:
             self.to(device=x.device, dtype=x.dtype)
@@ -115,10 +121,8 @@ class LlamaScopeSAE(nn.Module):
         error = x - recon
         for idx, scale in modifications:
             if scale > 0:
-                # Set a floor — doesn't compound through the KV cache
-                encoded[..., idx] = torch.clamp(encoded[..., idx], min=scale)
+                encoded[..., idx] += scale
             else:
-                # Suppress: zero out the feature
                 encoded[..., idx] = 0
         return self.decode(encoded) + error
 
@@ -182,6 +186,7 @@ def steer_activations(
     position: str,
     expansion: str,
     modifications: list[tuple[int, float]],
+    state: Optional[dict] = None,
 ) -> torch.Tensor:
     """Load SAE on this process (from HF cache) and steer activations.
 
@@ -194,6 +199,7 @@ def steer_activations(
         position: Hook position — "R", "M", or "A".
         expansion: "8x" or "32x".
         modifications: List of (feature_index, scale) pairs.
+        state: Mutable dict shared across generation steps for cutoff.
 
     Returns:
         Modified activations.
@@ -204,7 +210,7 @@ def steer_activations(
             layer, position, expansion, device=str(x.device),
         )
     sae = _worker_sae_cache[key]
-    return sae.steer(x, modifications)
+    return sae.steer(x, modifications, state=state)
 
 
 def ensure_downloaded(layer: int, position: str, expansion: str) -> None:
