@@ -1,0 +1,12 @@
+[project]
+name = "nnsight-vllm-demos"
+version = "0.1.0"
+description = "Demos of NNsight's vLLM integration"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "flashinfer-cubin==0.6.1", # Pinned to ensure matching versions
+    "flashinfer-python==0.6.1", # Pinned to ensure matching versions
+    "nnsight>=0.6.3",
+    "vllm==0.15.1", # Pinned, version required by nnsight
+]

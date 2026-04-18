@@ -19,11 +19,13 @@ This is not a constrained API with predefined operations. It's arbitrary Python 
 
 ## Setup
 
+Setup using `uv`:
+
 ```bash
-pip install nnsight
+uv sync
 ```
 
-NNsight pins a specific vLLM version. If there's a mismatch, it will tell you the exact version to install.
+A specific vLLM version is pinned in `pyproject.toml` to match `nnsight` requirements. You can also try a more recent version, and if there's a mismatch, an error will tell you the exact version to install.
 
 ## How It Works
 
